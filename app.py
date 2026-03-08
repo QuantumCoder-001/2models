@@ -62,6 +62,7 @@ def predict():
         return jsonify({"error": str(e)}), 400
 
 @app.route('/predict-report', methods=['POST'])
+@app.route('/predict-report', methods=['POST'])
 def predict_report():
     try:
         data = request.get_json()
@@ -76,10 +77,18 @@ def predict_report():
             'creatinine', 'troponin', 'crp'
         ]
 
-        input_values = [float(data.get(key, 0)) for key in feature_order]
+        # MODIFIED: If key is missing or None, use np.nan instead of 0
+        input_values = []
+        for key in feature_order:
+            val = data.get(key)
+            if val is None or val == "":
+                input_values.append(np.nan) # XGBoost recognizes np.nan as a missing value
+            else:
+                input_values.append(float(val))
+
         final_features = np.array([input_values])
 
-        # Get probabilities for blood report
+        # Get probabilities
         probs = blood_model.predict_proba(final_features)[0]
 
         # Get all predictions sorted by confidence
@@ -107,3 +116,4 @@ if __name__ == '__main__':
     # Use the PORT environment variable for Render
     port = int(os.environ.get("PORT", 5001))
     app.run(debug=True, port=port, host='0.0.0.0')
+
