@@ -3,75 +3,107 @@ from flask_cors import CORS
 import joblib
 import numpy as np
 import json
+import os
 
 app = Flask(__name__)
-CORS(app) 
+CORS(app)
 
-# Load the model, encoder, and feature list
-model = joblib.load('symptom_model.pkl')
-encoder = joblib.load('symptom_encoder.pkl')
-with open('symptom_features.json', 'r') as f:
-    features = json.load(f)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Load report prediction model
-report_model = joblib.load("health_model.pkl")
-disease_encoder = joblib.load("disease_encoder.pkl")
+# --- LOAD SYMPTOM MODEL ---
+try:
+    # Use consistent variable names to avoid overwriting
+    symptom_model = joblib.load(os.path.join(BASE_DIR, 'symptom_model.pkl'))
+    symptom_encoder = joblib.load(os.path.join(BASE_DIR, 'symptom_encoder.pkl'))
+    with open(os.path.join(BASE_DIR, 'symptom_features.json'), 'r') as f:
+        features = json.load(f)
+    print("✅ Symptom Model Loaded")
+except Exception as e:
+    print(f"❌ Symptom Model Error: {e}")
+
+# --- LOAD BLOOD REPORT MODEL ---
+try:
+    # UPDATED: Matches your uploaded filename 'health_model.pkl'
+    blood_model = joblib.load(os.path.join(BASE_DIR, 'health_model.pkl'))
+    # UPDATED: You uploaded 'disease_encoder.pkl', so we must load and use it
+    blood_encoder = joblib.load(os.path.join(BASE_DIR, 'disease_encoder.pkl'))
+    print("✅ Blood Report Model Loaded")
+except Exception as e:
+    print(f"❌ Blood Model Error: {e}")
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({
+        "status": "healthy",
+        "endpoints": ["/health", "/predict", "/predict-report", "/symptoms"]
+    })
 
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
         data = request.get_json()
         user_symptoms = data.get('symptoms', [])
-
-        # Create a 132-length input vector of zeros
         input_vector = np.zeros(len(features))
-        
-        # Set 1 for every symptom the user selected
         for s in user_symptoms:
             if s in features:
-                idx = features.index(s)
-                input_vector[idx] = 1
+                input_vector[features.index(s)] = 1
 
-        # Get probabilities for all diseases
-        probs = model.predict_proba([input_vector])[0]
-        
-        # Pick the top 3 highest probabilities
+        probs = symptom_model.predict_proba([input_vector])[0]
         top_3_idx = np.argsort(probs)[-3:][::-1]
-        
+
         results = []
         for i in top_3_idx:
             results.append({
-                "disease": encoder.inverse_transform([i])[0],
+                "disease": symptom_encoder.inverse_transform([i])[0],
                 "confidence": f"{round(probs[i] * 100, 2)}%"
             })
-
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route('/predict_report', methods=['POST'])
+@app.route('/predict-report', methods=['POST'])
 def predict_report():
     try:
         data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
 
-        # Convert input values to numpy array
-        input_data = np.array([list(data.values())])
+        feature_order = [
+            'glucose', 'cholesterol', 'hemoglobin', 'platelets',
+            'wbc', 'rbc', 'hematocrit', 'mcv', 'mch', 'mchc',
+            'insulin', 'bmi', 'systolic', 'diastolic', 'triglycerides',
+            'hba1c', 'ldl', 'hdl', 'alt', 'ast', 'heartRate',
+            'creatinine', 'troponin', 'crp'
+        ]
 
-        # Predict probabilities
-        probs = report_model.predict_proba(input_data)[0]
+        input_values = [float(data.get(key, 0)) for key in feature_order]
+        final_features = np.array([input_values])
+
+        # Get probabilities for blood report
+        probs = blood_model.predict_proba(final_features)[0]
+
+        # Get all predictions sorted by confidence
+        sorted_indices = np.argsort(probs)[::-1]
 
         results = []
-        for i, prob in enumerate(probs):
-            results.append({
-                "disease": disease_encoder.inverse_transform([i])[0],
-                "confidence": f"{round(prob*100,2)}%"
-            })
+        for i in sorted_indices:
+            if probs[i] > 0.01: # Only include results > 1% confidence
+                results.append({
+                    "disease": blood_encoder.inverse_transform([i])[0],
+                    "confidence": f"{round(probs[i] * 100, 2)}%",
+                    "confidence_level": "High" if probs[i] >= 0.7 else "Medium" if probs[i] >= 0.4 else "Low"
+                })
 
         return jsonify(results)
-
     except Exception as e:
+        print(f"❌ Blood Prediction Error: {str(e)}")
         return jsonify({"error": str(e)}), 400
 
+@app.route('/symptoms', methods=['GET'])
+def get_symptoms():
+    return jsonify({"success": True, "symptoms": features})
+
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    # Use the PORT environment variable for Render
+    port = int(os.environ.get("PORT", 5001))
+    app.run(debug=True, port=port, host='0.0.0.0')
