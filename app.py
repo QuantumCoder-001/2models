@@ -10,18 +10,19 @@ CORS(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# --- FULL 42-DISEASE RECOMMENDATION MAPPING ---
-# Note: Spellings here must match your model's encoder exactly.
+# --- FULL 42-DISEASE RECOMMENDATION MAPPING WITH PRECAUTIONS ---
 DISEASE_RECS = {
     "Metabolic/Endocrine": {
         "diseases": ["Diabetes", "Hypoglycemia", "Hypertension", "Hyperthyroidism", "Hypothyroidism"],
         "diet": "Low glycemic index foods, lean proteins, and high-fiber vegetables. Limit sodium/salt.",
-        "lifestyle": "Regular 30-min cardio, daily blood sugar/BP monitoring, and consistent sleep schedule."
+        "lifestyle": "Regular 30-min cardio, daily blood sugar/BP monitoring, and consistent sleep schedule.",
+        "precautions": "Avoid skipping meals. Carry a sugar source (for hypoglycemia). If symptoms worsen, consult a doctor immediately."
     },
     "Infectious (Viral/Bacterial/Parasitic)": {
         "diseases": ["Dengue", "Malaria", "Typhoid", "Chicken pox", "Common Cold", "Pneumonia", "Tuberculosis", "AIDS"],
         "diet": "High-calorie, high-protein diet (eggs, pulses). Stay hydrated with ORS and coconut water.",
-        "lifestyle": "Complete bed rest, isolation to prevent spread, and frequent temperature monitoring."
+        "lifestyle": "Complete bed rest, isolation to prevent spread, and frequent temperature monitoring.",
+        "precautions": "Avoid crowded places. Do not self-medicate with antibiotics. Maintain high personal hygiene."
     },
     "Digestive/Hepatic": {
         "diseases": [
@@ -30,17 +31,20 @@ DISEASE_RECS = {
             "Chronic cholestasis", "Dimorphic hemmorhoids(piles)"
         ],
         "diet": "Bland diet (BRAT: Bananas, Rice, Applesauce, Toast). Avoid spice, caffeine, and alcohol.",
-        "lifestyle": "Avoid lying down after meals, eat smaller portions, and maintain strict hand hygiene."
+        "lifestyle": "Avoid lying down after meals, eat smaller portions, and maintain strict hand hygiene.",
+        "precautions": "Avoid heavy lifting (for piles). Drink only filtered/boiled water. Stop alcohol consumption immediately."
     },
     "Dermatological": {
         "diseases": ["Acne", "Psoriasis", "Impetigo", "Fungal infection", "Drug Reaction"],
         "diet": "Hydrate (3L+ water/day). Include Vitamin E and Omega-3 rich foods like nuts and seeds.",
-        "lifestyle": "Keep skin clean/dry, use non-comedogenic products, and avoid sharing personal items."
+        "lifestyle": "Keep skin clean/dry, use non-comedogenic products, and avoid sharing personal items.",
+        "precautions": "Do not scratch or pop lesions. Avoid sharing personal items like towels. CONSULT A DOCTOR IMMEDIATELY if rash spreads."
     },
     "Respiratory": {
         "diseases": ["Bronchial Asthma", "Allergy"],
         "diet": "Anti-inflammatory foods (ginger, turmeric). Avoid cold/processed dairy if it triggers mucus.",
-        "lifestyle": "Avoid dust/smoke/pollen. Practice breathing exercises (Pranayama) and keep rescue inhalers ready."
+        "lifestyle": "Avoid dust/smoke/pollen. Practice breathing exercises (Pranayama) and keep rescue inhalers ready.",
+        "precautions": "Identify and avoid triggers. Keep the environment dust-free. Always carry an inhaler/emergency meds."
     },
     "Neurological/Musculoskeletal": {
         "diseases": [
@@ -48,12 +52,14 @@ DISEASE_RECS = {
             "Paralysis (brain hemorrhage)", "(vertigo) Paroxysmal Positional Vertigo"
         ],
         "diet": "Magnesium-rich foods (spinach, pumpkin seeds). Avoid aged cheese/processed meats for Migraines.",
-        "lifestyle": "Maintain ergonomic posture, gentle physiotherapy, and ensure a dark, quiet room for attacks."
+        "lifestyle": "Maintain ergonomic posture, gentle physiotherapy, and ensure a dark, quiet room for attacks.",
+        "precautions": "Avoid sudden head movements. Do not drive during dizzy spells. Use supportive pillows/orthotics as advised."
     },
     "Vascular/Systemic": {
         "diseases": ["Varicose veins", "Urinary tract infection", "Heart attack"],
         "diet": "Low saturated fats (Heart), Cranberry juice (UTI), High fiber (Varicose veins).",
-        "lifestyle": "Avoid long periods of standing/sitting. Regular walking to improve circulation."
+        "lifestyle": "Avoid long periods of standing/sitting. Regular walking to improve circulation.",
+        "precautions": "If experiencing chest pain, chew aspirin and call emergency services. For UTI, do not hold urine."
     }
 }
 
@@ -64,12 +70,14 @@ def get_recommendation(disease_name):
             return {
                 "category": category,
                 "diet": data["diet"],
-                "lifestyle": data["lifestyle"]
+                "lifestyle": data["lifestyle"],
+                "precautions": data["precautions"] # Added this field
             }
     return {
         "category": "General",
         "diet": "Maintain a balanced diet and stay hydrated.",
-        "lifestyle": "Consult a physician for a specific recovery plan."
+        "lifestyle": "Consult a physician for a specific recovery plan.",
+        "precautions": "Monitor symptoms closely. Seek professional medical advice for a detailed diagnosis."
     }
 
 # --- LOAD MODELS ---
@@ -97,7 +105,7 @@ def health_check():
 
 @app.route('/symptoms', methods=['GET'])
 def get_symptoms_list():
-    return jsonify(features)
+    return jsonify({"symptoms": features}) # Sends { "symptoms": [ "fever", "cough", ... ] }
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -170,3 +178,4 @@ def predict_report():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
     app.run(debug=True, port=port, host='0.0.0.0')
+
