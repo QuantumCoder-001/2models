@@ -11,6 +11,7 @@ CORS(app)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # --- FULL 42-DISEASE RECOMMENDATION MAPPING ---
+# Note: Spellings here must match your model's encoder exactly.
 DISEASE_RECS = {
     "Metabolic/Endocrine": {
         "diseases": ["Diabetes", "Hypoglycemia", "Hypertension", "Hyperthyroidism", "Hypothyroidism"],
@@ -18,13 +19,13 @@ DISEASE_RECS = {
         "lifestyle": "Regular 30-min cardio, daily blood sugar/BP monitoring, and consistent sleep schedule."
     },
     "Infectious (Viral/Bacterial/Parasitic)": {
-        "diseases": ["Dengue", "Malaria", "Typhoid", "Chicken pox", "Common Cold", "Pneumonia", "Tuberculosis", "AIDS", "Common Cold"],
+        "diseases": ["Dengue", "Malaria", "Typhoid", "Chicken pox", "Common Cold", "Pneumonia", "Tuberculosis", "AIDS"],
         "diet": "High-calorie, high-protein diet (eggs, pulses). Stay hydrated with ORS and coconut water.",
         "lifestyle": "Complete bed rest, isolation to prevent spread, and frequent temperature monitoring."
     },
     "Digestive/Hepatic": {
         "diseases": [
-            "GERD", "Peptic ulcer diseae", "Gastroenteritis", "Jaundice", "Hepatitis A", 
+            "GERD", "Peptic ulcer disease", "Gastroenteritis", "Jaundice", "Hepatitis A", 
             "Hepatitis B", "Hepatitis C", "Hepatitis D", "Hepatitis E", "Alcoholic hepatitis", 
             "Chronic cholestasis", "Dimorphic hemmorhoids(piles)"
         ],
@@ -43,8 +44,8 @@ DISEASE_RECS = {
     },
     "Neurological/Musculoskeletal": {
         "diseases": [
-            "Migraine", "Arthritis", "Osteoarthristis", "Cervical spondylosis", 
-            "Paralysis (brain hemorrhage)", "(vertigo) Paroymsal  Positional Vertigo"
+            "Migraine", "Arthritis", "Osteoarthritis", "Cervical spondylosis", 
+            "Paralysis (brain hemorrhage)", "(vertigo) Paroxysmal Positional Vertigo"
         ],
         "diet": "Magnesium-rich foods (spinach, pumpkin seeds). Avoid aged cheese/processed meats for Migraines.",
         "lifestyle": "Maintain ergonomic posture, gentle physiotherapy, and ensure a dark, quiet room for attacks."
@@ -57,10 +58,16 @@ DISEASE_RECS = {
 }
 
 def get_recommendation(disease_name):
+    """Searches for a recommendation based on the disease name."""
     for category, data in DISEASE_RECS.items():
         if disease_name in data["diseases"]:
-            return data
+            return {
+                "category": category,
+                "diet": data["diet"],
+                "lifestyle": data["lifestyle"]
+            }
     return {
+        "category": "General",
         "diet": "Maintain a balanced diet and stay hydrated.",
         "lifestyle": "Consult a physician for a specific recovery plan."
     }
@@ -83,29 +90,46 @@ except Exception as e:
     print(f"❌ Blood Model Error: {e}")
 
 # --- ENDPOINTS ---
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "online", "message": "ML Service is running"})
+
+@app.route('/symptoms', methods=['GET'])
+def get_symptoms_list():
+    return jsonify(features)
+
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
         data = request.get_json()
         user_symptoms = data.get('symptoms', [])
+        
+        # Create input vector
         input_vector = np.zeros(len(features))
         for s in user_symptoms:
             if s in features:
                 input_vector[features.index(s)] = 1
 
+        # Get probabilities
         probs = symptom_model.predict_proba([input_vector])[0]
         top_3_idx = np.argsort(probs)[-3:][::-1]
 
         results = []
-        for i in top_3_idx:
+        for rank, i in enumerate(top_3_idx):
             disease_name = symptom_encoder.inverse_transform([i])[0]
             conf_val = float(probs[i] * 100)
+            
+            # Attach recommendation only to the top (first) result
+            rec = get_recommendation(disease_name) if rank == 0 else None
+            
             results.append({
                 "disease": disease_name,
                 "confidence": f"{round(conf_val, 2)}%",
                 "prob_value": conf_val,
-                "recommendation": get_recommendation(disease_name) if i == top_3_idx[0] else None
+                "recommendation": rec
             })
+            
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -119,20 +143,26 @@ def predict_report():
             'mcv', 'mch', 'mchc', 'insulin', 'bmi', 'systolic', 'diastolic', 'triglycerides',
             'hba1c', 'ldl', 'hdl', 'alt', 'ast', 'heartRate', 'creatinine', 'troponin', 'crp'
         ]
+        
         input_values = [float(data.get(key, 0)) for key in feature_order]
         probs = blood_model.predict_proba(np.array([input_values]))[0]
         sorted_indices = np.argsort(probs)[::-1]
 
         results = []
-        for i in sorted_indices[:3]:  # Top 3
+        for rank, i in enumerate(sorted_indices[:3]):
             disease_name = blood_encoder.inverse_transform([i])[0]
             conf_val = float(probs[i] * 100)
+            
+            # Attach recommendation only to the top result
+            rec = get_recommendation(disease_name) if rank == 0 else None
+            
             results.append({
                 "disease": disease_name,
                 "confidence": f"{round(conf_val, 2)}%",
                 "prob_value": conf_val,
-                "recommendation": get_recommendation(disease_name) if i == sorted_indices[0] else None
+                "recommendation": rec
             })
+            
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
