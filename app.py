@@ -3,7 +3,7 @@ import json
 import joblib
 import numpy as np
 import cv2
-import gc  # Garbage Collector for memory management
+import gc
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import tensorflow as tf
@@ -112,6 +112,15 @@ except Exception as e:
 
 # --- ENDPOINTS ---
 
+@app.route('/')
+def home():
+    return "Health Prediction API is Running", 200
+
+# NEW: Explicit Health Check Route to stop the 404 errors
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy", "service": "active"}), 200
+
 @app.route('/model-status', methods=['GET'])
 def model_status():
     return jsonify({
@@ -119,10 +128,6 @@ def model_status():
         "blood_model": blood_model is not None,
         "xray_model_status": "Lazy-loaded on request"
     })
-
-@app.route('/')
-def home():
-    return "Health Prediction API is Running", 200
 
 @app.route('/symptoms', methods=['GET'])
 def get_symptoms_list():
