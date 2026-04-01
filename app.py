@@ -202,18 +202,16 @@ def predict_report():
 
 @app.route('/predict-xray', methods=['POST'])
 def predict_xray():
-    # 4. Input Validation
-    if not xray_svm or not mobilenet_extractor:
-        return jsonify({"error": "X-ray model is unavailable"}), 503
+    import gc  # Garbage Collector
     
-    if 'file' not in request.files:
-        return jsonify({"error": "No file provided"}), 400
-            
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "Empty filename"}), 400
-
     try:
+        # 1. Load Model ONLY when needed
+        extractor = MobileNetV2(weights='imagenet', include_top=False, pooling='avg', input_shape=(224, 224, 3))
+        svm = joblib.load(os.path.join(BASE_DIR, 'svm_model.pkl'))
+        scaler = joblib.load(os.path.join(BASE_DIR, 'scaler.pkl'))
+        classes = joblib.load(os.path.join(BASE_DIR, 'categories.pkl'))
+
+        file = request.files['file']
         img_bytes = np.frombuffer(file.read(), np.uint8)
         img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
         img = cv2.resize(img, (224, 224))
@@ -221,19 +219,25 @@ def predict_xray():
         img = np.expand_dims(img, axis=0)
         img = preprocess_input(img)
         
-        cnn_features = mobilenet_extractor(img, training=False).numpy()
-        features_scaled = xray_scaler.transform(cnn_features)
-        probs = xray_svm.predict_proba(features_scaled)[0]
+        # 2. Predict
+        features = extractor(img, training=False).numpy()
+        features_scaled = scaler.transform(features)
+        probs = svm.predict_proba(features_scaled)[0]
         
-        pred_idx = np.argmax(probs)
-        disease_name = xray_classes[pred_idx]
-        conf_val = float(probs[pred_idx] * 100)
+        res_idx = np.argmax(probs)
+        disease = classes[res_idx]
+        conf = f"{round(float(probs[res_idx] * 100), 2)}%"
+
+        # 3. FORCE CLEANUP
+        del extractor
+        del svm
         K.clear_session()
+        gc.collect() # Manually free RAM
 
         return jsonify({
-            "disease": disease_name,
-            "confidence": f"{round(conf_val, 2)}%",
-            "recommendation": get_recommendation(disease_name)
+            "disease": disease,
+            "confidence": conf,
+            "recommendation": get_recommendation(disease)
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
