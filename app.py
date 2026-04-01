@@ -1,9 +1,11 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+import os
+import json
 import joblib
 import numpy as np
-import json
-import os
+import cv2
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
 
 app = Flask(__name__)
 CORS(app)
@@ -19,7 +21,7 @@ DISEASE_RECS = {
         "precautions": "Avoid skipping meals. Carry a sugar source (for hypoglycemia). If symptoms worsen, consult a doctor immediately."
     },
     "Infectious (Viral/Bacterial/Parasitic)": {
-        "diseases": ["Dengue", "Malaria", "Typhoid", "Chicken pox", "Common Cold", "Pneumonia", "Tuberculosis", "AIDS"],
+        "diseases": ["Dengue", "Malaria", "Typhoid", "Chicken pox", "Common Cold", "Pneumonia", "Tuberculosis", "AIDS", "Covid"],
         "diet": "High-calorie, high-protein diet (eggs, pulses). Stay hydrated with ORS and coconut water.",
         "lifestyle": "Complete bed rest, isolation to prevent spread, and frequent temperature monitoring.",
         "precautions": "Avoid crowded places. Do not self-medicate with antibiotics. Maintain high personal hygiene."
@@ -41,7 +43,7 @@ DISEASE_RECS = {
         "precautions": "Do not scratch or pop lesions. Avoid sharing personal items like towels. CONSULT A DOCTOR IMMEDIATELY if rash spreads."
     },
     "Respiratory": {
-        "diseases": ["Bronchial Asthma", "Allergy"],
+        "diseases": ["Bronchial Asthma", "Allergy", "Normal"],
         "diet": "Anti-inflammatory foods (ginger, turmeric). Avoid cold/processed dairy if it triggers mucus.",
         "lifestyle": "Avoid dust/smoke/pollen. Practice breathing exercises (Pranayama) and keep rescue inhalers ready.",
         "precautions": "Identify and avoid triggers. Keep the environment dust-free. Always carry an inhaler/emergency meds."
@@ -71,7 +73,7 @@ def get_recommendation(disease_name):
                 "category": category,
                 "diet": data["diet"],
                 "lifestyle": data["lifestyle"],
-                "precautions": data["precautions"] # Added this field
+                "precautions": data["precautions"]
             }
     return {
         "category": "General",
@@ -81,6 +83,7 @@ def get_recommendation(disease_name):
     }
 
 # --- LOAD MODELS ---
+# Granular loading as per Version 2 requirements
 try:
     symptom_model = joblib.load(os.path.join(BASE_DIR, 'symptom_model.pkl'))
     symptom_encoder = joblib.load(os.path.join(BASE_DIR, 'symptom_encoder.pkl'))
@@ -97,7 +100,22 @@ try:
 except Exception as e:
     print(f"❌ Blood Model Error: {e}")
 
+try:
+    # Feature Extractor
+    resnet_extractor = ResNet50(weights='imagenet', include_top=False, pooling='avg', input_shape=(224, 224, 3))
+    # Hybrid SVM components
+    xray_svm = joblib.load(os.path.join(BASE_DIR, 'svm_model.pkl'))
+    xray_scaler = joblib.load(os.path.join(BASE_DIR, 'scaler.pkl'))
+    xray_classes = joblib.load(os.path.join(BASE_DIR, 'categories.pkl'))
+    print("✅ X-ray Hybrid Model Loaded")
+except Exception as e:
+    print(f"❌ X-ray Model Error: {e}")
+
 # --- ENDPOINTS ---
+
+@app.route('/')
+def home():
+    return "ML Service is Running", 200
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -105,39 +123,30 @@ def health_check():
 
 @app.route('/symptoms', methods=['GET'])
 def get_symptoms_list():
-    return jsonify({"symptoms": features}) # Sends { "symptoms": [ "fever", "cough", ... ] }
+    return jsonify({"symptoms": features})
 
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
         data = request.get_json()
         user_symptoms = data.get('symptoms', [])
-        
-        # Create input vector
         input_vector = np.zeros(len(features))
         for s in user_symptoms:
             if s in features:
                 input_vector[features.index(s)] = 1
-
-        # Get probabilities
         probs = symptom_model.predict_proba([input_vector])[0]
         top_3_idx = np.argsort(probs)[-3:][::-1]
-
         results = []
         for rank, i in enumerate(top_3_idx):
             disease_name = symptom_encoder.inverse_transform([i])[0]
             conf_val = float(probs[i] * 100)
-            
-            # Attach recommendation only to the top (first) result
             rec = get_recommendation(disease_name) if rank == 0 else None
-            
             results.append({
                 "disease": disease_name,
                 "confidence": f"{round(conf_val, 2)}%",
                 "prob_value": conf_val,
                 "recommendation": rec
             })
-            
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -151,68 +160,42 @@ def predict_report():
             'mcv', 'mch', 'mchc', 'insulin', 'bmi', 'systolic', 'diastolic', 'triglycerides',
             'hba1c', 'ldl', 'hdl', 'alt', 'ast', 'heartRate', 'creatinine', 'troponin', 'crp'
         ]
-        
         input_values = [float(data.get(key, 0)) for key in feature_order]
         probs = blood_model.predict_proba(np.array([input_values]))[0]
         sorted_indices = np.argsort(probs)[::-1]
-
         results = []
         for rank, i in enumerate(sorted_indices[:3]):
             disease_name = blood_encoder.inverse_transform([i])[0]
             conf_val = float(probs[i] * 100)
-            
-            # Attach recommendation only to the top result
             rec = get_recommendation(disease_name) if rank == 0 else None
-            
             results.append({
                 "disease": disease_name,
                 "confidence": f"{round(conf_val, 2)}%",
                 "prob_value": conf_val,
                 "recommendation": rec
             })
-            
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-# --- X-RAY MODEL INTEGRATION ---
-import cv2
-from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
-
-# Load ResNet50 for feature extraction (without top layers)
-resnet_extractor = ResNet50(weights='imagenet', include_top=False, pooling='avg', input_shape=(224, 224, 3))
-
-# Load the saved Hybrid components
-try:
-    xray_svm = joblib.load(os.path.join(BASE_DIR, 'svm_model.pkl'))
-    xray_scaler = joblib.load(os.path.join(BASE_DIR, 'scaler.pkl'))
-    xray_classes = joblib.load(os.path.join(BASE_DIR, 'categories.pkl'))
-    print("✅ X-ray Hybrid Model Loaded")
-except Exception as e:
-    print(f"❌ X-ray Model Error: {e}")
-
 @app.route('/predict-xray', methods=['POST'])
 def predict_xray():
     try:
-        # Get image from request
         file = request.files['file']
         img_bytes = np.frombuffer(file.read(), np.uint8)
         img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
-
-        # Preprocess to match training (224x224, RGB)
         img = cv2.resize(img, (224, 224))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = np.expand_dims(img, axis=0)
         img = preprocess_input(img)
-
-        # Step 1: Extract features via CNN
-        features = resnet_extractor.predict(img)
-
-        # Step 2: Scale and Predict via SVM
-        features_scaled = xray_scaler.transform(features)
+        
+        # Step 1: Feature Extraction (ResNet50)
+        features_extracted = resnet_extractor.predict(img)
+        
+        # Step 2: SVM Prediction
+        features_scaled = xray_scaler.transform(features_extracted)
         probs = xray_svm.predict_proba(features_scaled)[0]
         
-        # Get result
         pred_idx = np.argmax(probs)
         disease_name = xray_classes[pred_idx]
         conf_val = float(probs[pred_idx] * 100)
@@ -226,6 +209,8 @@ def predict_xray():
         return jsonify({"error": str(e)}), 400
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5001))
-    app.run(debug=True, port=port, host='0.0.0.0')
-
+    # Render assigns the port dynamically; default to 10000
+    port = int(os.environ.get("PORT", 10000))
+    # Use environment variable to set debug mode safely
+    debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    app.run(debug=debug_mode, port=port, host='0.0.0.0')
