@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import tensorflow as tf
 from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
+from tensorflow.keras import backend as K
 
 app = Flask(__name__)
 CORS(app)
@@ -220,13 +221,14 @@ def predict_xray():
         img = np.expand_dims(img, axis=0)
         img = preprocess_input(img)
         
-        cnn_features = mobilenet_extractor.predict(img)
+        cnn_features = mobilenet_extractor(img, training=False).numpy()
         features_scaled = xray_scaler.transform(cnn_features)
         probs = xray_svm.predict_proba(features_scaled)[0]
         
         pred_idx = np.argmax(probs)
         disease_name = xray_classes[pred_idx]
         conf_val = float(probs[pred_idx] * 100)
+        K.clear_session()
 
         return jsonify({
             "disease": disease_name,
