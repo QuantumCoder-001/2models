@@ -3,21 +3,25 @@ import json
 import joblib
 import numpy as np
 import cv2
+import gc  # Garbage Collector for memory management
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import tensorflow as tf
 from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
 from tensorflow.keras import backend as K
 
+# Force TensorFlow to use CPU only to save memory
+tf.config.set_visible_devices([], 'GPU')
+
 app = Flask(__name__)
 CORS(app)
 
-# 5. Add Request Size Limit (16MB)
+# Limit request size to 16MB
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# --- RECOMMENDATION MAPPING (Kept for Logic) ---
+# --- RECOMMENDATION MAPPING ---
 DISEASE_RECS = {
     "Metabolic/Endocrine": {
         "diseases": ["Diabetes", "Hypoglycemia", "Hypertension", "Hyperthyroidism", "Hypothyroidism"],
@@ -86,12 +90,9 @@ def get_recommendation(disease_name):
         "precautions": "Monitor symptoms closely. Seek professional medical advice."
     }
 
-# --- 1. GRANULAR MODEL LOADING ---
-
-# Global variables initialized to None
+# --- 1. LIGHTWEIGHT MODEL LOADING (Startup) ---
 symptom_model = symptom_encoder = features = None
 blood_model = blood_encoder = None
-mobilenet_extractor = xray_svm = xray_scaler = xray_classes = None
 
 try:
     symptom_model = joblib.load(os.path.join(BASE_DIR, 'symptom_model.pkl'))
@@ -109,35 +110,19 @@ try:
 except Exception as e:
     print(f"❌ Blood Model Error: {e}")
 
-try:
-    mobilenet_extractor = MobileNetV2(weights='imagenet', include_top=False, pooling='avg', input_shape=(224, 224, 3))
-    # 3. Freeze weights for inference
-    mobilenet_extractor.trainable = False 
-    
-    xray_svm = joblib.load(os.path.join(BASE_DIR, 'svm_model.pkl'))
-    xray_scaler = joblib.load(os.path.join(BASE_DIR, 'scaler.pkl'))
-    xray_classes = joblib.load(os.path.join(BASE_DIR, 'categories.pkl'))
-    print("✅ X-ray Hybrid Model (MobileNetV2) Loaded")
-except Exception as e:
-    print(f"❌ X-ray Model Error: {e}")
+# --- ENDPOINTS ---
 
-# --- 2. MODEL AVAILABILITY ENDPOINT ---
 @app.route('/model-status', methods=['GET'])
 def model_status():
     return jsonify({
         "symptom_model": symptom_model is not None,
         "blood_model": blood_model is not None,
-        "xray_model": xray_svm is not None,
-        "feature_extractor": mobilenet_extractor is not None
+        "xray_model_status": "Lazy-loaded on request"
     })
 
 @app.route('/')
 def home():
-    return "Health Prediction API (MobileNetV2) is Running", 200
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "online"})
+    return "Health Prediction API is Running", 200
 
 @app.route('/symptoms', methods=['GET'])
 def get_symptoms_list():
@@ -145,12 +130,10 @@ def get_symptoms_list():
         return jsonify({"error": "Symptom features not loaded"}), 500
     return jsonify({"symptoms": features})
 
-# --- PREDICTION ENDPOINTS ---
-
 @app.route('/predict', methods=['POST'])
 def predict():
     if not symptom_model:
-        return jsonify({"error": "Symptom model is unavailable"}), 503
+        return jsonify({"error": "Symptom model unavailable"}), 503
     try:
         data = request.get_json()
         user_symptoms = data.get('symptoms', [])
@@ -168,32 +151,6 @@ def predict():
             results.append({
                 "disease": disease_name,
                 "confidence": f"{round(conf_val, 2)}%",
-                "prob_value": conf_val,
-                "recommendation": rec
-            })
-        return jsonify(results)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-@app.route('/predict-report', methods=['POST'])
-def predict_report():
-    if not blood_model:
-        return jsonify({"error": "Blood model is unavailable"}), 503
-    try:
-        data = request.get_json()
-        feature_order = ['glucose', 'cholesterol', 'hemoglobin', 'platelets', 'wbc', 'rbc', 'hematocrit', 'mcv', 'mch', 'mchc', 'insulin', 'bmi', 'systolic', 'diastolic', 'triglycerides', 'hba1c', 'ldl', 'hdl', 'alt', 'ast', 'heartRate', 'creatinine', 'troponin', 'crp']
-        input_values = [float(data.get(key, 0)) for key in feature_order]
-        probs = blood_model.predict_proba(np.array([input_values]))[0]
-        sorted_indices = np.argsort(probs)[::-1]
-        results = []
-        for rank, i in enumerate(sorted_indices[:3]):
-            disease_name = blood_encoder.inverse_transform([i])[0]
-            conf_val = float(probs[i] * 100)
-            rec = get_recommendation(disease_name) if rank == 0 else None
-            results.append({
-                "disease": disease_name,
-                "confidence": f"{round(conf_val, 2)}%",
-                "prob_value": conf_val,
                 "recommendation": rec
             })
         return jsonify(results)
@@ -202,10 +159,8 @@ def predict_report():
 
 @app.route('/predict-xray', methods=['POST'])
 def predict_xray():
-    import gc  # Garbage Collector
-    
     try:
-        # 1. Load Model ONLY when needed
+        # LAZY LOAD: Only load heavy models when endpoint is called
         extractor = MobileNetV2(weights='imagenet', include_top=False, pooling='avg', input_shape=(224, 224, 3))
         svm = joblib.load(os.path.join(BASE_DIR, 'svm_model.pkl'))
         scaler = joblib.load(os.path.join(BASE_DIR, 'scaler.pkl'))
@@ -217,22 +172,23 @@ def predict_xray():
         img = cv2.resize(img, (224, 224))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = np.expand_dims(img, axis=0)
-        img = preprocess_input(img)
+        img = preprocess_input(img.astype(np.float32))
         
-        # 2. Predict
-        features = extractor(img, training=False).numpy()
-        features_scaled = scaler.transform(features)
+        # Inference
+        features_vec = extractor(img, training=False).numpy()
+        features_scaled = scaler.transform(features_vec)
         probs = svm.predict_proba(features_scaled)[0]
         
         res_idx = np.argmax(probs)
         disease = classes[res_idx]
         conf = f"{round(float(probs[res_idx] * 100), 2)}%"
 
-        # 3. FORCE CLEANUP
+        # FORCE MEMORY CLEANUP
         del extractor
         del svm
+        del scaler
         K.clear_session()
-        gc.collect() # Manually free RAM
+        gc.collect() 
 
         return jsonify({
             "disease": disease,
@@ -244,5 +200,4 @@ def predict_xray():
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
-    debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
-    app.run(debug=debug_mode, port=port, host='0.0.0.0')
+    app.run(debug=False, port=port, host='0.0.0.0')
