@@ -175,6 +175,56 @@ def predict_report():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
+# --- X-RAY MODEL INTEGRATION ---
+import cv2
+from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
+
+# Load ResNet50 for feature extraction (without top layers)
+resnet_extractor = ResNet50(weights='imagenet', include_top=False, pooling='avg', input_shape=(224, 224, 3))
+
+# Load the saved Hybrid components
+try:
+    xray_svm = joblib.load(os.path.join(BASE_DIR, 'svm_model.pkl'))
+    xray_scaler = joblib.load(os.path.join(BASE_DIR, 'scaler.pkl'))
+    xray_classes = joblib.load(os.path.join(BASE_DIR, 'categories.pkl'))
+    print("✅ X-ray Hybrid Model Loaded")
+except Exception as e:
+    print(f"❌ X-ray Model Error: {e}")
+
+@app.route('/predict-xray', methods=['POST'])
+def predict_xray():
+    try:
+        # Get image from request
+        file = request.files['file']
+        img_bytes = np.frombuffer(file.read(), np.uint8)
+        img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
+
+        # Preprocess to match training (224x224, RGB)
+        img = cv2.resize(img, (224, 224))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = np.expand_dims(img, axis=0)
+        img = preprocess_input(img)
+
+        # Step 1: Extract features via CNN
+        features = resnet_extractor.predict(img)
+
+        # Step 2: Scale and Predict via SVM
+        features_scaled = xray_scaler.transform(features)
+        probs = xray_svm.predict_proba(features_scaled)[0]
+        
+        # Get result
+        pred_idx = np.argmax(probs)
+        disease_name = xray_classes[pred_idx]
+        conf_val = float(probs[pred_idx] * 100)
+
+        return jsonify({
+            "disease": disease_name,
+            "confidence": f"{round(conf_val, 2)}%",
+            "recommendation": get_recommendation(disease_name)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
     app.run(debug=True, port=port, host='0.0.0.0')
