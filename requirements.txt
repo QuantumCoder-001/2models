@@ -8,3 +8,4 @@ xgboost==2.0.3
 opencv-python-headless
 tensorflow-cpu>=2.16.1
 psutil
+pytesseract
