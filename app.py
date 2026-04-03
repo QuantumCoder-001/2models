@@ -211,15 +211,29 @@ def extract_report():
     img = Image.open(file.stream)
     text = pytesseract.image_to_string(img)
     
-    # Simple regex parser to find values next to keywords
+    # Map report labels to your specific API keys
+    mapping = {
+        'glucose': [r'BLOOD SUGAR FASTING', r'GLUCOSE'],
+        'cholesterol': [r'Sr\.CHOLESTEROL', r'TOTAL CHOLESTEROL'],
+        'hdl': [r'Sr\.HDL', r'HDL'],
+        'ldl': [r'Sr\.LDL', r'LDL'],
+        'triglycerides': [r'Sr\.TGRIGLYCERIDE', r'TRIGLYCERIDES'],
+        'creatinine': [r'Sr\.CREATININE'],
+        'hemoglobin': [r'HAEMOGLOBIN', r'HB'],
+        'ast': [r'SGOT'],
+        'alt': [r'SGPT']
+    }
+
     extracted_values = {}
-    for key in BLOOD_RANGES.keys():
-        # Look for the keyword followed by optional colon/spaces and a number
-        pattern = re.compile(rf"{key}[:\s]*(\d+\.?\d*)", re.IGNORECASE)
-        match = pattern.search(text)
-        if match:
-            extracted_values[key] = match.group(1)
-            
+    for key, patterns in mapping.items():
+        for pattern_str in patterns:
+            # This regex looks for the label, skips any characters/colons, and finds the number
+            pattern = re.compile(rf"{pattern_str}.*?(\d+\.?\d*)", re.IGNORECASE)
+            match = pattern.search(text)
+            if match:
+                extracted_values[key] = match.group(1)
+                break # Move to next key once found
+                
     return jsonify(extracted_values)
 
 @app.route('/predict', methods=['POST'])
