@@ -9,6 +9,7 @@ import tensorflow as tf
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
+# --- TENSORFLOW MEMORY OPTIMIZATION ---
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
 tf.config.set_visible_devices([], 'GPU')
@@ -22,6 +23,7 @@ CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# --- FULL 42-DISEASE PROFESSIONAL RECOMMENDATION ENGINE ---
 DETAILED_RECS = {
     "Endocrine/Metabolic": {
         "diseases": ["Diabetes", "Hypoglycemia", "Hyperthyroidism", "Hypothyroidism"],
@@ -40,7 +42,7 @@ DETAILED_RECS = {
         "next_steps": "Daily BP charting and Cardiology consultation for an Echocardiogram."
     },
     "Infectious (Systemic)": {
-        "diseases": ["Dengue", "Malaria", "Typhoid", "Chicken pox", "AIDS", "hepatitis A", "Hepatitis B", "Hepatitis C", "Hepatitis D", "Hepatitis E"],
+        "diseases": ["Dengue", "Malaria", "Typhoid", "Chicken pox", "AIDS", "hepatitis A", "Hepatitis B", "Hepatitis C", "Hepatitis D", "Hepatitis E", "Infectious (Viral/Bacterial/Parasitic)"],
         "clinical_context": "Supporting the immune system during acute viral/bacterial load and preventing dehydration.",
         "diet": "Transition to a high-calorie, soft-residue diet. Focus on electrolyte-rich fluids (ORS, Coconut water).",
         "lifestyle": "Phase 1: Absolute bed rest. Phase 2: Gradual mobilization only after fever subsidence.",
@@ -51,12 +53,12 @@ DETAILED_RECS = {
         "diseases": ["Bronchial Asthma", "Pneumonia", "Tuberculosis", "Common Cold", "Covid", "Allergy", "covid", "tb", "pnumonia", "pneumothorax"],
         "clinical_context": "Reduction of airway inflammation and improvement of pulmonary ventilation.",
         "diet": "Anti-inflammatory focus: Turmeric, ginger, and Vitamin D rich foods. Ensure high fluid intake to thin mucus.",
-        "lifestyle": "Incorporate Diaphragmatic breathing. Use HEPA filters indoors. Practice steam inhalation (40-45C).",
+        "lifestyle": "Incorporate Diaphragmatic breathing. Practice steam inhalation (40-45C).",
         "contraindications": "Avoid environmental triggers (smoke, dander). Avoid mucus-forming dairy if congestion is high.",
         "next_steps": "Spirometry (PFT) or Chest X-ray follow-up as advised by a Pulmonologist."
     },
     "Gastrointestinal": {
-        "diseases": ["GERD", "Peptic ulcer diseae", "Gastroenteritis", "Dimorphic hemmorhoids(piles)"],
+        "diseases": ["GERD", "Peptic ulcer diseae", "Gastroenteritis", "Dimorphic hemmorhoids(piles)", "Peptic ulcer disease"],
         "clinical_context": "Mucosal protection and regulation of gastric acid secretion/bowel motility.",
         "diet": "Adopt the BRAT-P diet (Banana, Rice, Applesauce, Toast, Probiotics). Small, frequent alkaline meals.",
         "lifestyle": "Elevate head of bed by 6 inches. Avoid restrictive clothing around the abdomen.",
@@ -80,7 +82,7 @@ DETAILED_RECS = {
         "next_steps": "Neurological physical exam and potential MRI/CT follow-up."
     },
     "Musculoskeletal": {
-        "diseases": ["Arthritis", "Osteoarthristis", "Cervical spondylosis"],
+        "diseases": ["Arthritis", "Osteoarthristis", "Cervical spondylosis", "Osteoarthritis"],
         "clinical_context": "Reduction of joint inflammation and preservation of articular cartilage.",
         "diet": "Turmeric, walnuts, calcium-rich foods. Maintain optimal vitamin D levels.",
         "lifestyle": "Low-impact exercise (swimming). Use heat packs.",
@@ -134,15 +136,16 @@ def get_detailed_rec(disease_name):
                 "recommended_follow_up": data["next_steps"]
             }
     return {
-        "category": "General Health",
+        "category": "General",
         "summary": f"Observation plan for {disease_name}.",
         "clinical_context": "Generic physiological support during recovery.",
         "personalized_diet": "Balanced macronutrients with high hydration.",
         "lifestyle_adjustments": "Rest and avoidance of strenuous activity.",
         "strict_contraindications": "Avoid self-medication.",
-        "recommended_follow_up": "Primary Care Physician (PCP) consultation."
+        "recommended_follow_up": "Consult Physician."
     }
 
+# --- GLOBAL MODELS (Baseline) ---
 symptom_model = symptom_encoder = features = blood_model = blood_encoder = None
 
 try:
@@ -152,15 +155,25 @@ try:
         features = json.load(f)
     blood_model = joblib.load(os.path.join(BASE_DIR, 'health_model.pkl'))
     blood_encoder = joblib.load(os.path.join(BASE_DIR, 'disease_encoder.pkl'))
-except:
-    pass
+    print("✅ Base Models Loaded")
+except Exception as e:
+    print(f"❌ Startup Load Error: {e}")
 
-@app.route('/health')
-def health():
-    return jsonify({"status": "healthy", "memory": f"{psutil.virtual_memory().percent}%"}), 200
+# --- ENDPOINTS ---
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "online", "memory": f"{psutil.virtual_memory().percent}%"}), 200
+
+# FIXED: This was missing and caused the 404 in your frontend
+@app.route('/symptoms', methods=['GET'])
+def get_symptoms_list():
+    if not features:
+        return jsonify({"error": "Features not loaded"}), 500
+    return jsonify({"symptoms": features})
 
 @app.route('/predict', methods=['POST'])
-def predict_symptoms():
+def predict():
     try:
         data = request.get_json()
         user_symptoms = data.get('symptoms', [])
@@ -169,30 +182,42 @@ def predict_symptoms():
             if s in features: input_vector[features.index(s)] = 1
         
         probs = symptom_model.predict_proba([input_vector])[0]
-        top_idx = np.argsort(probs)[-1]
-        disease = symptom_encoder.inverse_transform([top_idx])[0]
+        top_3_idx = np.argsort(probs)[-3:][::-1]
         
-        return jsonify({
-            "disease": disease,
-            "confidence": f"{round(float(probs[top_idx]*100), 2)}%",
-            "recommendation": get_detailed_rec(disease)
-        })
+        results = []
+        for rank, i in enumerate(top_3_idx):
+            disease_name = symptom_encoder.inverse_transform([i])[0]
+            conf_val = float(probs[i] * 100)
+            rec = get_detailed_rec(disease_name) if rank == 0 else None
+            results.append({
+                "disease": disease_name,
+                "confidence": f"{round(conf_val, 2)}%",
+                "recommendation": rec
+            })
+        return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route('/predict-blood', methods=['POST'])
-def predict_blood():
+@app.route('/predict-report', methods=['POST'])
+def predict_report():
     try:
         data = request.get_json()
-        values = np.array(data.get('values', [])).reshape(1, -1)
+        # Ensure this order matches your blood_model training order
+        feature_order = [
+            'glucose', 'cholesterol', 'hemoglobin', 'platelets', 'wbc', 'rbc', 'hematocrit', 
+            'mcv', 'mch', 'mchc', 'insulin', 'bmi', 'systolic', 'diastolic', 'triglycerides',
+            'hba1c', 'ldl', 'hdl', 'alt', 'ast', 'heartRate', 'creatinine', 'troponin', 'crp'
+        ]
+        input_values = [float(data.get(key, 0)) for key in feature_order]
+        probs = blood_model.predict_proba(np.array([input_values]))[0]
+        top_idx = np.argsort(probs)[-1]
+        disease = blood_encoder.inverse_transform([top_idx])[0]
         
-        prediction = blood_model.predict(values)[0]
-        disease = blood_encoder.inverse_transform([prediction])[0]
-        
-        return jsonify({
+        return jsonify([{
             "disease": disease,
+            "confidence": f"{round(float(probs[top_idx]*100), 2)}%",
             "recommendation": get_detailed_rec(disease)
-        })
+        }])
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -201,8 +226,9 @@ def predict_xray():
     extractor = svm = scaler = img = None
     try:
         if psutil.virtual_memory().available / (1024 * 1024) < 150:
-            return jsonify({"error": "Low memory, try again"}), 503
+            return jsonify({"error": "Low memory, please wait"}), 503
         
+        # LAZY LOAD HEAVY MODELS
         extractor = tf.keras.models.load_model(os.path.join(BASE_DIR, 'mobilenet_extractor.h5'), compile=False)
         svm = joblib.load(os.path.join(BASE_DIR, 'svm_model.pkl'))
         scaler = joblib.load(os.path.join(BASE_DIR, 'scaler.pkl'))
