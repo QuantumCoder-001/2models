@@ -9,11 +9,6 @@ import re
 import tensorflow as tf
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-try:
-    import pytesseract
-    from PIL import Image
-except ImportError:
-    pytesseract = None
 
 # --- TENSORFLOW CONFIG ---
 tf.config.threading.set_intra_op_parallelism_threads(1)
@@ -200,41 +195,6 @@ def health():
 @app.route('/symptoms', methods=['GET'])
 def get_symptoms():
     return jsonify({"symptoms": features})
-
-# --- NEW: AUTO-FILL EXTRACTION ROUTE ---
-@app.route('/extract-report', methods=['POST'])
-def extract_report():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-    
-    file = request.files['file']
-    img = Image.open(file.stream)
-    text = pytesseract.image_to_string(img)
-    
-    # Map report labels to your specific API keys
-    mapping = {
-        'glucose': [r'BLOOD SUGAR FASTING', r'GLUCOSE'],
-        'cholesterol': [r'Sr\.CHOLESTEROL', r'TOTAL CHOLESTEROL'],
-        'hdl': [r'Sr\.HDL', r'HDL'],
-        'ldl': [r'Sr\.LDL', r'LDL'],
-        'triglycerides': [r'Sr\.TGRIGLYCERIDE', r'TRIGLYCERIDES'],
-        'creatinine': [r'Sr\.CREATININE'],
-        'hemoglobin': [r'HAEMOGLOBIN', r'HB'],
-        'ast': [r'SGOT'],
-        'alt': [r'SGPT']
-    }
-
-    extracted_values = {}
-    for key, patterns in mapping.items():
-        for pattern_str in patterns:
-            # This regex looks for the label, skips any characters/colons, and finds the number
-            pattern = re.compile(rf"{pattern_str}.*?(\d+\.?\d*)", re.IGNORECASE)
-            match = pattern.search(text)
-            if match:
-                extracted_values[key] = match.group(1)
-                break # Move to next key once found
-                
-    return jsonify(extracted_values)
 
 @app.route('/predict', methods=['POST'])
 def predict():
