@@ -5,9 +5,15 @@ import numpy as np
 import cv2
 import gc
 import psutil
+import re
 import tensorflow as tf
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+try:
+    import pytesseract
+    from PIL import Image
+except ImportError:
+    pytesseract = None
 
 # --- TENSORFLOW CONFIG ---
 tf.config.threading.set_intra_op_parallelism_threads(1)
@@ -22,6 +28,32 @@ app = Flask(__name__)
 CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# --- NORMALIZATION RANGES (Real World -> 0-1 Scale) ---
+BLOOD_RANGES = {
+    'glucose': [60, 200], 'cholesterol': [120, 300], 'hemoglobin': [8, 18],
+    'platelets': [100, 450], 'wbc': [3, 15], 'rbc': [3, 7],
+    'hematocrit': [30, 55], 'mcv': [70, 110], 'mch': [20, 40],
+    'mchc': [28, 38], 'insulin': [2, 30], 'bmi': [15, 45],
+    'systolic': [90, 180], 'diastolic': [60, 110], 'triglycerides': [50, 250],
+    'hba1c': [4, 12], 'ldl': [50, 200], 'hdl': [20, 100],
+    'alt': [5, 60], 'ast': [5, 60], 'heartRate': [50, 120],
+    'creatinine': [0.5, 2.0], 'troponin': [0, 0.5], 'crp': [0, 20]
+}
+
+def normalize_input(data):
+    feature_order = [
+        'glucose', 'cholesterol', 'hemoglobin', 'platelets', 'wbc', 'rbc', 'hematocrit', 
+        'mcv', 'mch', 'mchc', 'insulin', 'bmi', 'systolic', 'diastolic', 'triglycerides',
+        'hba1c', 'ldl', 'hdl', 'alt', 'ast', 'heartRate', 'creatinine', 'troponin', 'crp'
+    ]
+    normalized = []
+    for key in feature_order:
+        val = float(data.get(key, 0))
+        r_min, r_max = BLOOD_RANGES[key]
+        norm = (val - r_min) / (r_max - r_min)
+        normalized.append(np.clip(norm, 0, 1))
+    return np.array([normalized])
 
 # --- FULL PROFESSIONAL RECOMMENDATION ENGINE ---
 DETAILED_RECS = {
@@ -169,6 +201,27 @@ def health():
 def get_symptoms():
     return jsonify({"symptoms": features})
 
+# --- NEW: AUTO-FILL EXTRACTION ROUTE ---
+@app.route('/extract-report', methods=['POST'])
+def extract_report():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    
+    file = request.files['file']
+    img = Image.open(file.stream)
+    text = pytesseract.image_to_string(img)
+    
+    # Simple regex parser to find values next to keywords
+    extracted_values = {}
+    for key in BLOOD_RANGES.keys():
+        # Look for the keyword followed by optional colon/spaces and a number
+        pattern = re.compile(rf"{key}[:\s]*(\d+\.?\d*)", re.IGNORECASE)
+        match = pattern.search(text)
+        if match:
+            extracted_values[key] = match.group(1)
+            
+    return jsonify(extracted_values)
+
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
@@ -192,13 +245,9 @@ def predict():
 def predict_report():
     try:
         data = request.get_json()
-        feature_order = [
-            'glucose', 'cholesterol', 'hemoglobin', 'platelets', 'wbc', 'rbc', 'hematocrit', 
-            'mcv', 'mch', 'mchc', 'insulin', 'bmi', 'systolic', 'diastolic', 'triglycerides',
-            'hba1c', 'ldl', 'hdl', 'alt', 'ast', 'heartRate', 'creatinine', 'troponin', 'crp'
-        ]
-        vals = [float(data.get(key, 0)) for key in feature_order]
-        probs = blood_model.predict_proba(np.array([vals]))[0]
+        # Automatically normalize real values to 0-1 scale before predicting
+        vals = normalize_input(data)
+        probs = blood_model.predict_proba(vals)[0]
         idx = np.argsort(probs)[-1]
         name = blood_encoder.inverse_transform([idx])[0]
         return jsonify([{
