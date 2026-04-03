@@ -1,9 +1,10 @@
 flask
 flask-cors
 joblib
-scikit-learn==1.6.1
-numpy
+scikit-learn==1.5.2
+numpy<2.0.0
 gunicorn
-xgboost
+xgboost==2.0.3
 opencv-python-headless
-tensorflow-cpu
+tensorflow-cpu==2.15.0
+psutil
