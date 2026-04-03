@@ -4,204 +4,237 @@ import joblib
 import numpy as np
 import cv2
 import gc
+import psutil
+import tensorflow as tf
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import tensorflow as tf
-from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
-from tensorflow.keras import backend as K
 
-# Force TensorFlow to use CPU only to save memory
+tf.config.threading.set_intra_op_parallelism_threads(1)
+tf.config.threading.set_inter_op_parallelism_threads(1)
 tf.config.set_visible_devices([], 'GPU')
+try:
+    tf.config.experimental.set_memory_growth = True
+except:
+    pass
 
 app = Flask(__name__)
 CORS(app)
-
-# Limit request size to 16MB
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# --- RECOMMENDATION MAPPING ---
-DISEASE_RECS = {
-    "Metabolic/Endocrine": {
-        "diseases": ["Diabetes", "Hypoglycemia", "Hypertension", "Hyperthyroidism", "Hypothyroidism"],
-        "diet": "Low glycemic index foods, lean proteins. Limit sodium.",
-        "lifestyle": "Regular 30-min cardio, daily monitoring.",
-        "precautions": "Avoid skipping meals. Carry a sugar source."
+DETAILED_RECS = {
+    "Endocrine/Metabolic": {
+        "diseases": ["Diabetes", "Hypoglycemia", "Hyperthyroidism", "Hypothyroidism"],
+        "clinical_context": "Focus on stabilizing blood glucose fluctuations and improving insulin sensitivity through low-glycemic indexing.",
+        "diet": "Prioritize soluble fiber (steel-cut oats, legumes) and lean alpha-proteins. Replace simple sugars with complex carbohydrates.",
+        "lifestyle": "Post-prandial (after meal) 15-minute walks are critical. Maintain a strict circadian rhythm for hormonal balance.",
+        "contraindications": "Avoid high-fructose corn syrups, processed 'white' flours, and erratic fasting windows.",
+        "next_steps": "HbA1c screening and fasting lipid profile recommended."
     },
-    "Infectious (Viral/Bacterial/Parasitic)": {
-        "diseases": ["Dengue", "Malaria", "Typhoid", "Chicken pox", "Common Cold", "Pneumonia", "Tuberculosis", "AIDS", "Covid"],
-        "diet": "High-calorie, high-protein diet. Stay hydrated.",
-        "lifestyle": "Complete bed rest, isolation to prevent spread.",
-        "precautions": "Avoid crowded places. Do not self-medicate."
+    "Cardiovascular": {
+        "diseases": ["Hypertension", "Heart attack", "Varicose veins", "Heart Di"],
+        "clinical_context": "Management of systemic vascular resistance and reduction of cardiac workload.",
+        "diet": "Adhere to the DASH protocol: Reduce sodium intake to <2g/day. Increase Omega-3 via flaxseeds or walnuts.",
+        "lifestyle": "Incorporate low-impact steady-state (LISS) cardio. Implement Progressive Muscle Relaxation (PMR) for stress reduction.",
+        "contraindications": "Strictly avoid trans-fats, excessive caffeine, and nicotine. Avoid isometric exercises that spike BP.",
+        "next_steps": "Daily BP charting and Cardiology consultation for an Echocardiogram."
     },
-    "Digestive/Hepatic": {
-        "diseases": [
-            "GERD", "Peptic ulcer disease", "Gastroenteritis", "Jaundice", "Hepatitis A", 
-            "Hepatitis B", "Hepatitis C", "Hepatitis D", "Hepatitis E", "Alcoholic hepatitis", 
-            "Chronic cholestasis", "Dimorphic hemmorhoids(piles)"
-        ],
-        "diet": "Bland diet (Bananas, Rice, Toast). Avoid spice and alcohol.",
-        "lifestyle": "Smaller portions, avoid lying down after meals.",
-        "precautions": "Drink filtered water. Stop alcohol immediately."
+    "Infectious (Systemic)": {
+        "diseases": ["Dengue", "Malaria", "Typhoid", "Chicken pox", "AIDS", "hepatitis A", "Hepatitis B", "Hepatitis C", "Hepatitis D", "Hepatitis E"],
+        "clinical_context": "Supporting the immune system during acute viral/bacterial load and preventing dehydration.",
+        "diet": "Transition to a high-calorie, soft-residue diet. Focus on electrolyte-rich fluids (ORS, Coconut water).",
+        "lifestyle": "Phase 1: Absolute bed rest. Phase 2: Gradual mobilization only after fever subsidence.",
+        "contraindications": "Avoid NSAIDs (like Aspirin/Ibuprofen) due to bleeding risks in Dengue. Avoid heavy, oily meals.",
+        "next_steps": "Complete Blood Count (CBC) monitoring, specifically Platelet trends."
+    },
+    "Respiratory": {
+        "diseases": ["Bronchial Asthma", "Pneumonia", "Tuberculosis", "Common Cold", "Covid", "Allergy", "covid", "tb", "pnumonia", "pneumothorax"],
+        "clinical_context": "Reduction of airway inflammation and improvement of pulmonary ventilation.",
+        "diet": "Anti-inflammatory focus: Turmeric, ginger, and Vitamin D rich foods. Ensure high fluid intake to thin mucus.",
+        "lifestyle": "Incorporate Diaphragmatic breathing. Use HEPA filters indoors. Practice steam inhalation (40-45C).",
+        "contraindications": "Avoid environmental triggers (smoke, dander). Avoid mucus-forming dairy if congestion is high.",
+        "next_steps": "Spirometry (PFT) or Chest X-ray follow-up as advised by a Pulmonologist."
+    },
+    "Gastrointestinal": {
+        "diseases": ["GERD", "Peptic ulcer diseae", "Gastroenteritis", "Dimorphic hemmorhoids(piles)"],
+        "clinical_context": "Mucosal protection and regulation of gastric acid secretion/bowel motility.",
+        "diet": "Adopt the BRAT-P diet (Banana, Rice, Applesauce, Toast, Probiotics). Small, frequent alkaline meals.",
+        "lifestyle": "Elevate head of bed by 6 inches. Avoid restrictive clothing around the abdomen.",
+        "contraindications": "Avoid late-night meals (within 3 hours of sleep). Eliminate spicy peppers, citrus, and carbonated drinks.",
+        "next_steps": "Gastroenterology review; consider H. Pylori testing if ulcers are suspected."
+    },
+    "Hepatobiliary": {
+        "diseases": ["Jaundice", "Alcoholic hepatitis", "Chronic cholestasis"],
+        "clinical_context": "Minimizing hepatic metabolic load to facilitate cellular regeneration.",
+        "diet": "Ultra-low-fat diet. Primary energy from simple glucose (sugarcane juice, honey). Boiled vegetables only.",
+        "lifestyle": "Absolute physical rest for liver cellular repair.",
+        "contraindications": "Zero alcohol or hepatotoxic over-the-counter drugs. Avoid all fried/fatty foods.",
+        "next_steps": "Liver Function Test (LFT) and Viral Load markers."
+    },
+    "Neurological": {
+        "diseases": ["Migraine", "Paralysis (brain hemorrhage)", "(vertigo) Paroymsal Positional Vertigo"],
+        "clinical_context": "Neuro-vascular stabilization and management of sensory triggers.",
+        "diet": "Ensure adequate Magnesium and B2 (Riboflavin). Maintain consistent hydration.",
+        "lifestyle": "Maintain a 'Headache Diary' to identify triggers. Practice strict sleep hygiene.",
+        "contraindications": "Avoid aged cheeses, MSG, and artificial sweeteners.",
+        "next_steps": "Neurological physical exam and potential MRI/CT follow-up."
+    },
+    "Musculoskeletal": {
+        "diseases": ["Arthritis", "Osteoarthristis", "Cervical spondylosis"],
+        "clinical_context": "Reduction of joint inflammation and preservation of articular cartilage.",
+        "diet": "Turmeric, walnuts, calcium-rich foods. Maintain optimal vitamin D levels.",
+        "lifestyle": "Low-impact exercise (swimming). Use heat packs.",
+        "contraindications": "Avoid jerky movements. Maintain ergonomic posture.",
+        "next_steps": "Rheumatoid factor test and orthopedic evaluation."
     },
     "Dermatological": {
         "diseases": ["Acne", "Psoriasis", "Impetigo", "Fungal infection", "Drug Reaction"],
-        "diet": "Hydrate (3L+ water). Vitamin E rich foods.",
-        "lifestyle": "Keep skin clean/dry, use non-comedogenic products.",
-        "precautions": "Do not scratch lesions. Avoid sharing towels."
+        "clinical_context": "Restoring epidermal barrier function and regulating sebum/inflammatory responses.",
+        "diet": "High water intake. Limit dairy and processed sugar. Zinc-rich foods.",
+        "lifestyle": "Use mild cleansers. Change linens frequently.",
+        "contraindications": "Do not scratch lesions. Avoid sharing towels.",
+        "next_steps": "Dermatological assessment for topical or systemic therapy."
     },
-    "Respiratory": {
-        "diseases": ["Bronchial Asthma", "Allergy", "Normal"],
-        "diet": "Anti-inflammatory foods (ginger, turmeric).",
-        "lifestyle": "Avoid dust/smoke. Practice breathing exercises.",
-        "precautions": "Keep environment dust-free. Carry an inhaler if asthmatic."
+    "Urological": {
+        "diseases": ["Urinary tract infection"],
+        "clinical_context": "Eradication of pathogenic bacteria from the urinary tract and mucosal soothing.",
+        "diet": "Unsweetened cranberry juice, high water intake.",
+        "lifestyle": "Strict personal hygiene. Frequent voiding.",
+        "contraindications": "Complete the full antibiotic course. Avoid holding urine.",
+        "next_steps": "Urine routine and microscopy; culture sensitivity test."
     },
-    "Neurological/Musculoskeletal": {
-        "diseases": [
-            "Migraine", "Arthritis", "Osteoarthritis", "Cervical spondylosis", 
-            "Paralysis (brain hemorrhage)", "(vertigo) Paroxysmal Positional Vertigo"
-        ],
-        "diet": "Magnesium-rich foods (spinach, seeds).",
-        "lifestyle": "Maintain ergonomic posture, physiotherapy.",
-        "precautions": "Avoid sudden head movements. Do not drive during dizzy spells."
+    "Hematological": {
+        "diseases": ["Anemia", "Thalasse", "Thromboc"],
+        "clinical_context": "Optimization of red blood cell indices, hemoglobin synthesis, and platelet function.",
+        "diet": "Iron-rich foods (spinach, red meat) paired with Vitamin C for absorption. Folate-rich greens.",
+        "lifestyle": "Pace daily activities to manage fatigue. Prevent physical trauma if platelets are low.",
+        "contraindications": "Avoid consuming calcium/dairy simultaneously with iron supplements.",
+        "next_steps": "Comprehensive peripheral blood smear and ferritin level check."
     },
-    "Vascular/Systemic": {
-        "diseases": ["Varicose veins", "Urinary tract infection", "Heart attack"],
-        "diet": "Low saturated fats, Cranberry juice, High fiber.",
-        "lifestyle": "Avoid long standing. Regular walking.",
-        "precautions": "For chest pain, seek emergency help. Drink plenty of water for UTI."
+    "General/Healthy": {
+        "diseases": ["Healthy"],
+        "clinical_context": "Maintenance of current physiological homeostasis and preventive care.",
+        "diet": "Balanced macronutrients following the Mediterranean or standard balanced plate model.",
+        "lifestyle": "150 minutes of moderate aerobic activity weekly. 7-9 hours of sleep.",
+        "contraindications": "Avoid sedentary habits and ultra-processed foods.",
+        "next_steps": "Annual routine health checkups."
     }
 }
 
-def get_recommendation(disease_name):
-    for category, data in DISEASE_RECS.items():
+def get_detailed_rec(disease_name):
+    for category, data in DETAILED_RECS.items():
         if disease_name in data["diseases"]:
             return {
                 "category": category,
-                "diet": data["diet"],
-                "lifestyle": data["lifestyle"],
-                "precautions": data["precautions"]
+                "summary": f"Professional management plan for suspected {disease_name}.",
+                "clinical_context": data["clinical_context"],
+                "personalized_diet": data["diet"],
+                "lifestyle_adjustments": data["lifestyle"],
+                "strict_contraindications": data["contraindications"],
+                "recommended_follow_up": data["next_steps"]
             }
     return {
-        "category": "General",
-        "diet": "Maintain a balanced diet and stay hydrated.",
-        "lifestyle": "Consult a physician for a specific recovery plan.",
-        "precautions": "Monitor symptoms closely. Seek professional medical advice."
+        "category": "General Health",
+        "summary": f"Observation plan for {disease_name}.",
+        "clinical_context": "Generic physiological support during recovery.",
+        "personalized_diet": "Balanced macronutrients with high hydration.",
+        "lifestyle_adjustments": "Rest and avoidance of strenuous activity.",
+        "strict_contraindications": "Avoid self-medication.",
+        "recommended_follow_up": "Primary Care Physician (PCP) consultation."
     }
 
-# --- 1. LIGHTWEIGHT MODEL LOADING (Startup) ---
-symptom_model = symptom_encoder = features = None
-blood_model = blood_encoder = None
+symptom_model = symptom_encoder = features = blood_model = blood_encoder = None
 
 try:
     symptom_model = joblib.load(os.path.join(BASE_DIR, 'symptom_model.pkl'))
     symptom_encoder = joblib.load(os.path.join(BASE_DIR, 'symptom_encoder.pkl'))
     with open(os.path.join(BASE_DIR, 'symptom_features.json'), 'r') as f:
         features = json.load(f)
-    print("✅ Symptom Model Loaded")
-except Exception as e:
-    print(f"❌ Symptom Model Error: {e}")
-
-try:
     blood_model = joblib.load(os.path.join(BASE_DIR, 'health_model.pkl'))
     blood_encoder = joblib.load(os.path.join(BASE_DIR, 'disease_encoder.pkl'))
-    print("✅ Blood Report Model Loaded")
-except Exception as e:
-    print(f"❌ Blood Model Error: {e}")
+except:
+    pass
 
-# --- ENDPOINTS ---
-
-@app.route('/')
-def home():
-    return "Health Prediction API is Running", 200
-
-# NEW: Explicit Health Check Route to stop the 404 errors
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "healthy", "service": "active"}), 200
-
-@app.route('/model-status', methods=['GET'])
-def model_status():
-    return jsonify({
-        "symptom_model": symptom_model is not None,
-        "blood_model": blood_model is not None,
-        "xray_model_status": "Lazy-loaded on request"
-    })
-
-@app.route('/symptoms', methods=['GET'])
-def get_symptoms_list():
-    if not features:
-        return jsonify({"error": "Symptom features not loaded"}), 500
-    return jsonify({"symptoms": features})
+@app.route('/health')
+def health():
+    return jsonify({"status": "healthy", "memory": f"{psutil.virtual_memory().percent}%"}), 200
 
 @app.route('/predict', methods=['POST'])
-def predict():
-    if not symptom_model:
-        return jsonify({"error": "Symptom model unavailable"}), 503
+def predict_symptoms():
     try:
         data = request.get_json()
         user_symptoms = data.get('symptoms', [])
         input_vector = np.zeros(len(features))
         for s in user_symptoms:
-            if s in features:
-                input_vector[features.index(s)] = 1
+            if s in features: input_vector[features.index(s)] = 1
+        
         probs = symptom_model.predict_proba([input_vector])[0]
-        top_3_idx = np.argsort(probs)[-3:][::-1]
-        results = []
-        for rank, i in enumerate(top_3_idx):
-            disease_name = symptom_encoder.inverse_transform([i])[0]
-            conf_val = float(probs[i] * 100)
-            rec = get_recommendation(disease_name) if rank == 0 else None
-            results.append({
-                "disease": disease_name,
-                "confidence": f"{round(conf_val, 2)}%",
-                "recommendation": rec
-            })
-        return jsonify(results)
+        top_idx = np.argsort(probs)[-1]
+        disease = symptom_encoder.inverse_transform([top_idx])[0]
+        
+        return jsonify({
+            "disease": disease,
+            "confidence": f"{round(float(probs[top_idx]*100), 2)}%",
+            "recommendation": get_detailed_rec(disease)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route('/predict-blood', methods=['POST'])
+def predict_blood():
+    try:
+        data = request.get_json()
+        values = np.array(data.get('values', [])).reshape(1, -1)
+        
+        prediction = blood_model.predict(values)[0]
+        disease = blood_encoder.inverse_transform([prediction])[0]
+        
+        return jsonify({
+            "disease": disease,
+            "recommendation": get_detailed_rec(disease)
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
 @app.route('/predict-xray', methods=['POST'])
 def predict_xray():
+    extractor = svm = scaler = img = None
     try:
-        # LAZY LOAD: Only load heavy models when endpoint is called
-        extractor = MobileNetV2(weights='imagenet', include_top=False, pooling='avg', input_shape=(224, 224, 3))
+        if psutil.virtual_memory().available / (1024 * 1024) < 150:
+            return jsonify({"error": "Low memory, try again"}), 503
+        
+        extractor = tf.keras.models.load_model(os.path.join(BASE_DIR, 'mobilenet_extractor.h5'), compile=False)
         svm = joblib.load(os.path.join(BASE_DIR, 'svm_model.pkl'))
         scaler = joblib.load(os.path.join(BASE_DIR, 'scaler.pkl'))
         classes = joblib.load(os.path.join(BASE_DIR, 'categories.pkl'))
-
+        
         file = request.files['file']
-        img_bytes = np.frombuffer(file.read(), np.uint8)
-        img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
+        img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_COLOR)
         img = cv2.resize(img, (224, 224))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = (img.astype(np.float32) / 127.5) - 1.0
         img = np.expand_dims(img, axis=0)
-        img = preprocess_input(img.astype(np.float32))
         
-        # Inference
-        features_vec = extractor(img, training=False).numpy()
-        features_scaled = scaler.transform(features_vec)
-        probs = svm.predict_proba(features_scaled)[0]
-        
+        feats = extractor.predict(img, verbose=0)
+        feats_scaled = scaler.transform(feats)
+        probs = svm.predict_proba(feats_scaled)[0]
         res_idx = np.argmax(probs)
         disease = classes[res_idx]
-        conf = f"{round(float(probs[res_idx] * 100), 2)}%"
-
-        # FORCE MEMORY CLEANUP
-        del extractor
-        del svm
-        del scaler
-        K.clear_session()
-        gc.collect() 
-
+        
         return jsonify({
             "disease": disease,
-            "confidence": conf,
-            "recommendation": get_recommendation(disease)
+            "confidence": f"{round(float(probs[res_idx]*100), 2)}%",
+            "recommendation": get_detailed_rec(disease)
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+    finally:
+        if extractor: del extractor
+        if svm: del svm
+        if scaler: del scaler
+        if img is not None: del img
+        tf.keras.backend.clear_session()
+        gc.collect()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
