@@ -9,7 +9,7 @@ import tensorflow as tf
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# --- TENSORFLOW MEMORY OPTIMIZATION ---
+# --- TENSORFLOW CONFIG ---
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
 tf.config.set_visible_devices([], 'GPU')
@@ -23,7 +23,7 @@ CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# --- FULL 42-DISEASE PROFESSIONAL RECOMMENDATION ENGINE ---
+# --- FULL PROFESSIONAL RECOMMENDATION ENGINE ---
 DETAILED_RECS = {
     "Endocrine/Metabolic": {
         "diseases": ["Diabetes", "Hypoglycemia", "Hyperthyroidism", "Hypothyroidism"],
@@ -124,30 +124,28 @@ DETAILED_RECS = {
 }
 
 def get_detailed_rec(disease_name):
+    name_clean = str(disease_name).strip().lower()
     for category, data in DETAILED_RECS.items():
-        if disease_name in data["diseases"]:
+        if any(d.lower() in name_clean for d in data["diseases"]):
             return {
                 "category": category,
                 "summary": f"Professional management plan for suspected {disease_name}.",
                 "clinical_context": data["clinical_context"],
-                "personalized_diet": data["diet"],
-                "lifestyle_adjustments": data["lifestyle"],
-                "strict_contraindications": data["contraindications"],
-                "recommended_follow_up": data["next_steps"]
+                "diet": data["diet"],
+                "lifestyle": data["lifestyle"],
+                "precautions": data["contraindications"],
+                "next_steps": data["next_steps"]
             }
     return {
         "category": "General",
-        "summary": f"Observation plan for {disease_name}.",
-        "clinical_context": "Generic physiological support during recovery.",
-        "personalized_diet": "Balanced macronutrients with high hydration.",
-        "lifestyle_adjustments": "Rest and avoidance of strenuous activity.",
-        "strict_contraindications": "Avoid self-medication.",
-        "recommended_follow_up": "Consult Physician."
+        "diet": "Maintain a balanced diet and stay hydrated.",
+        "lifestyle": "Consult a physician for a specific recovery plan.",
+        "precautions": "Monitor symptoms. Seek professional advice.",
+        "next_steps": "Physician consultation."
     }
 
-# --- GLOBAL MODELS (Baseline) ---
+# --- LOAD MODELS ---
 symptom_model = symptom_encoder = features = blood_model = blood_encoder = None
-
 try:
     symptom_model = joblib.load(os.path.join(BASE_DIR, 'symptom_model.pkl'))
     symptom_encoder = joblib.load(os.path.join(BASE_DIR, 'symptom_encoder.pkl'))
@@ -157,19 +155,18 @@ try:
     blood_encoder = joblib.load(os.path.join(BASE_DIR, 'disease_encoder.pkl'))
     print("✅ Base Models Loaded")
 except Exception as e:
-    print(f"❌ Startup Load Error: {e}")
+    print(f"❌ Startup Error: {e}")
 
-# --- ENDPOINTS ---
+@app.route('/')
+def home():
+    return "Health API Online", 200
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "online", "memory": f"{psutil.virtual_memory().percent}%"}), 200
+@app.route('/health')
+def health():
+    return jsonify({"status": "online", "mem": f"{psutil.virtual_memory().percent}%"}), 200
 
-# FIXED: This was missing and caused the 404 in your frontend
 @app.route('/symptoms', methods=['GET'])
-def get_symptoms_list():
-    if not features:
-        return jsonify({"error": "Features not loaded"}), 500
+def get_symptoms():
     return jsonify({"symptoms": features})
 
 @app.route('/predict', methods=['POST'])
@@ -177,24 +174,17 @@ def predict():
     try:
         data = request.get_json()
         user_symptoms = data.get('symptoms', [])
-        input_vector = np.zeros(len(features))
+        vec = np.zeros(len(features))
         for s in user_symptoms:
-            if s in features: input_vector[features.index(s)] = 1
-        
-        probs = symptom_model.predict_proba([input_vector])[0]
-        top_3_idx = np.argsort(probs)[-3:][::-1]
-        
-        results = []
-        for rank, i in enumerate(top_3_idx):
-            disease_name = symptom_encoder.inverse_transform([i])[0]
-            conf_val = float(probs[i] * 100)
-            rec = get_detailed_rec(disease_name) if rank == 0 else None
-            results.append({
-                "disease": disease_name,
-                "confidence": f"{round(conf_val, 2)}%",
-                "recommendation": rec
-            })
-        return jsonify(results)
+            if s in features: vec[features.index(s)] = 1
+        probs = symptom_model.predict_proba([vec])[0]
+        idx = np.argsort(probs)[-1]
+        name = symptom_encoder.inverse_transform([idx])[0]
+        return jsonify([{
+            "disease": name,
+            "confidence": f"{round(float(probs[idx]*100), 2)}%",
+            "recommendation": get_detailed_rec(name)
+        }])
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -202,34 +192,33 @@ def predict():
 def predict_report():
     try:
         data = request.get_json()
-        # Ensure this order matches your blood_model training order
         feature_order = [
             'glucose', 'cholesterol', 'hemoglobin', 'platelets', 'wbc', 'rbc', 'hematocrit', 
             'mcv', 'mch', 'mchc', 'insulin', 'bmi', 'systolic', 'diastolic', 'triglycerides',
             'hba1c', 'ldl', 'hdl', 'alt', 'ast', 'heartRate', 'creatinine', 'troponin', 'crp'
         ]
-        input_values = [float(data.get(key, 0)) for key in feature_order]
-        probs = blood_model.predict_proba(np.array([input_values]))[0]
-        top_idx = np.argsort(probs)[-1]
-        disease = blood_encoder.inverse_transform([top_idx])[0]
-        
+        vals = [float(data.get(key, 0)) for key in feature_order]
+        probs = blood_model.predict_proba(np.array([vals]))[0]
+        idx = np.argsort(probs)[-1]
+        name = blood_encoder.inverse_transform([idx])[0]
         return jsonify([{
-            "disease": disease,
-            "confidence": f"{round(float(probs[top_idx]*100), 2)}%",
-            "recommendation": get_detailed_rec(disease)
+            "disease": name,
+            "confidence": f"{round(float(probs[idx]*100), 2)}%",
+            "recommendation": get_detailed_rec(name)
         }])
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
 @app.route('/predict-xray', methods=['POST'])
 def predict_xray():
-    extractor = svm = scaler = img = None
+    extractor = None
+    m_path = os.path.join(BASE_DIR, 'mobilenet_extractor.h5')
+    if not os.path.exists(m_path):
+        return jsonify({"error": f"Model missing at {m_path}"}), 500
     try:
-        if psutil.virtual_memory().available / (1024 * 1024) < 150:
-            return jsonify({"error": "Low memory, please wait"}), 503
-        
-        # LAZY LOAD HEAVY MODELS
-        extractor = tf.keras.models.load_model(os.path.join(BASE_DIR, 'mobilenet_extractor.h5'), compile=False)
+        if psutil.virtual_memory().available / (1024 * 1024) < 100:
+            return jsonify({"error": "Low memory"}), 503
+        extractor = tf.keras.models.load_model(m_path, compile=False)
         svm = joblib.load(os.path.join(BASE_DIR, 'svm_model.pkl'))
         scaler = joblib.load(os.path.join(BASE_DIR, 'scaler.pkl'))
         classes = joblib.load(os.path.join(BASE_DIR, 'categories.pkl'))
@@ -237,28 +226,22 @@ def predict_xray():
         file = request.files['file']
         img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_COLOR)
         img = cv2.resize(img, (224, 224))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = (img.astype(np.float32) / 127.5) - 1.0
-        img = np.expand_dims(img, axis=0)
+        img = (cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 127.5) - 1.0
         
-        feats = extractor.predict(img, verbose=0)
-        feats_scaled = scaler.transform(feats)
-        probs = svm.predict_proba(feats_scaled)[0]
+        feats = extractor.predict(np.expand_dims(img, axis=0), verbose=0)
+        probs = svm.predict_proba(scaler.transform(feats))[0]
         res_idx = np.argmax(probs)
-        disease = classes[res_idx]
+        name = classes[res_idx]
         
         return jsonify({
-            "disease": disease,
+            "disease": name,
             "confidence": f"{round(float(probs[res_idx]*100), 2)}%",
-            "recommendation": get_detailed_rec(disease)
+            "recommendation": get_detailed_rec(name)
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
     finally:
         if extractor: del extractor
-        if svm: del svm
-        if scaler: del scaler
-        if img is not None: del img
         tf.keras.backend.clear_session()
         gc.collect()
 
